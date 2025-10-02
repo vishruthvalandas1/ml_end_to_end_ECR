@@ -1,4 +1,6 @@
+from ast import Param
 import os
+from sqlite3 import paramstyle
 import sys
 from src.exception import CustomException
 from src.logger import logging
@@ -44,10 +46,39 @@ class ModelTrainer:
                 "XGBRegressor": XGBRegressor(),
                 "CatBoost Regressor": CatBoostRegressor(verbose=False)
             }
-            model_report: dict = evaluate_model(X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test, models=models)
-            best_model_score = max(sorted(list(model_report.values())))
+
+            Param={
+                "Random Forest": {
+                    "n_estimators": [8, 16, 32, 64, 128, 256]
+                },
+                "Decision Tree": {"criterion": ["squared_error", "friedman_mse", "absolute_error", "poisson"]},
+                "Gradient Boost": {
+                    "learning_rate": [0.1, 0.01, 0.05, 0.001],
+                    "n_estimators": [8, 16, 32, 64, 128, 256]
+                },
+                "Linear Regression": {},
+                "KNN": {"n_neighbors": [5, 11, 15, 20]},
+                "AdaBoost Regressor": {
+                    "learning_rate": [0.1, 0.01, 0.05, 0.001],
+                    "n_estimators": [8, 16, 32, 64, 128, 256]
+                },
+                "XGBRegressor": {
+                    "learning_rate": [0.1, 0.01, 0.05, 0.001],
+                    "n_estimators": [8, 16, 32, 64, 128, 256]
+                },
+                "CatBoost Regressor": {
+                    "depth": [6, 8, 10],
+                    "learning_rate": [0.01, 0.05, 0.1],
+                    "iterations": [30, 50, 100]
+                }
+
+            }
+            logging.info("Model Training started")
+            model_report: dict = evaluate_model(X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test, models=models,params=Param)
+            logging.info(f"Model Report : {[model[0] for model in model_report.values()]}")
+            best_model_score = max(sorted([model[0] for model in model_report.values()]))
             best_model_name = list(model_report.keys())[
-                list(model_report.values()).index(best_model_score)
+                list([model[0] for model in model_report.values()]).index(best_model_score)
             ]
             best_model = models[best_model_name]
             if best_model_score < 0.6:
