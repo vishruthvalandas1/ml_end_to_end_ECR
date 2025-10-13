@@ -1,12 +1,13 @@
-pandas
 numpy
-seaborn
+pandas
 matplotlib
-ipykernel
+seaborn
 scikit-learn
+ipykernel
 catboost
 xgboost
-flask
 dill
-gunicorn==23.0.0
--e .
+flask
+flask_cors
+lime
+#-e .
