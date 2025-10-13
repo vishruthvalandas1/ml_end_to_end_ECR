@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from src.pipeline.predict_pipeline import CustomData,PredictPipeline
-
+from app import app as application
 application = Flask(__name__)
 
 app = application
