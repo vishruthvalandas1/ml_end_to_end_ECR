@@ -11,9 +11,9 @@ permissions:
   id-token: write
 
 env:
-  AWS_REGION: us-east-1            # <-- set your region
-  ECR_REPOSITORY: student-performance       # <-- set your ECR repo name
-  CONTAINER_PORT: 8080             # internal port your app listens on
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: student-performance
+  CONTAINER_PORT: 8080
 
 jobs:
   integration:
@@ -39,7 +39,6 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # AWS auth (ACCESS KEYS)
       - name: Configure AWS credentials (access keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -69,63 +68,56 @@ jobs:
           echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
   deploy:
-  name: Continuous Deployment (self-hosted)
-  needs: build-and-push-ecr-image
-  runs-on: self-hosted
-  steps:
-    - name: Checkout (optional)
-      uses: actions/checkout@v4
+    name: Continuous Deployment (self-hosted)
+    needs: build-and-push-ecr-image
+    runs-on: self-hosted
+    steps:
+      - name: Checkout (optional)
+        uses: actions/checkout@v4
 
-    - name: Configure AWS credentials (access keys or OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-region: ${{ env.AWS_REGION }}
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        # If using OIDC instead, replace the three lines above with role-to-assume + session name
+      - name: Configure AWS credentials (access keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-    # 🔧 Pre-pull cleanup to avoid ENOSPC
-    - name: Free Docker space (pre-pull)
-      run: |
-        set -euxo pipefail
-        # stop & remove old containers
-        docker ps -aq | xargs -r docker stop
-        docker ps -aq | xargs -r docker rm
-        # prune unused images/networks
-        docker system prune -af
-        # prune unused volumes (safe if you don't persist volumes)
-        docker volume prune -f
-        # prune builder cache
-        docker builder prune -af || true
+      - name: Free Docker space (pre-pull)
+        run: |
+          set -euxo pipefail
+          docker ps -aq | xargs -r docker stop
+          docker ps -aq | xargs -r docker rm
+          docker system prune -af
+          docker volume prune -f
+          docker builder prune -af || true
 
-    - name: Pull the just-built image
-      run: docker pull "${{ needs.build-and-push-ecr-image.outputs.image_uri }}"
+      - name: Pull the just-built image
+        run: docker pull "${{ needs.build-and-push-ecr-image.outputs.image_uri }}"
 
-    - name: Stop & remove previous container if running
-      run: |
-        if [ "$(docker ps -aq -f name=mltest)" ]; then
-          docker stop mltest || true
-          docker rm mltest || true
-        fi
+      - name: Stop & remove previous container if running
+        run: |
+          if [ "$(docker ps -aq -f name=mltest)" ]; then
+            docker stop mltest || true
+            docker rm mltest || true
+          fi
 
-    - name: Run container
-      env:
-        IMAGE_URI: ${{ needs.build-and-push-ecr-image.outputs.image_uri }}
-      run: |
-        docker run -d \
-          --name mltest \
-          --restart unless-stopped \
-          -p 8080:${{ env.CONTAINER_PORT }} \
-          --ipc="host" \
-          -e AWS_REGION=${{ env.AWS_REGION }} \
-          "$IMAGE_URI"
+      - name: Run container
+        env:
+          IMAGE_URI: ${{ needs.build-and-push-ecr-image.outputs.image_uri }}
+        run: |
+          docker run -d \
+            --name mltest \
+            --restart unless-stopped \
+            -p 8080:${{ env.CONTAINER_PORT }} \
+            --ipc="host" \
+            -e AWS_REGION=${{ env.AWS_REGION }} \
+            "$IMAGE_URI"
 
-    # 🧹 Post-deploy: keep disk usage in check
-    - name: Prune dangling images (post-deploy)
-      run: |
-        docker image prune -f
-        docker builder prune -af || true
+      - name: Prune dangling images (post-deploy)
+        run: |
+          docker image prune -f
+          docker builder prune -af || true
