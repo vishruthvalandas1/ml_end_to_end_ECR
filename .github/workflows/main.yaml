@@ -1,7 +1,4 @@
-# This workflow will install Python dependencies, run tests and lint with a single version of Python
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
-name: 
+name: CI/CD to ECR and self-hosted
 
 on:
   push:
@@ -11,83 +8,115 @@ on:
 
 permissions:
   contents: read
+  id-token: write                   # needed if you use OIDC (recommended)
 
 jobs:
   integration:
-   name: Continuous Integration
-   runs-on: ubuntu-latest
-   steps:
+    name: Continuous Integration
+    runs-on: ubuntu-latest
+    steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Lint code
         run: echo "Linting Repository"
 
-      - name: Run unit Test
+      - name: Run unit tests
         run: echo "Running Unit Tests"
 
-  
-  
   build-and-push-ecr-image:
-   name: Continuous Delivery
-   needs: integration
-   runs-on: ubuntu-latest
-   steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-    
-    - name: Install Utilities
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y jq unzip
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+    name: Continuous Delivery (Build & Push)
+    needs: integration
+    runs-on: ubuntu-latest
+    outputs:
+      image_uri: ${{ steps.build-image.outputs.image }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
+      # --- Auth to AWS ---
+      # Recommended: OIDC (assume a role), comment this block and uncomment the access-key block if you must.
+      # - name: Configure AWS credentials (OIDC)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-region: ${{ env.AWS_REGION }}
+      #     role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}    # e.g. arn:aws:iam::<acct>:role/GitHubActionsDeployRole
+      #     role-session-name: gha-ecr-push
 
-    - name: Build, tag, and push image to Amazon ECR
-      id: build-image
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        # Build a docker container and
-        # push it to ECR so that it can
-        # be deployed to ECS.
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+      # Fallback (NOT recommended): access keys
+      # - name: Configure AWS credentials (access keys)
+      #   if: ${{ false }} # set to true only if you cannot use OIDC
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ${{ env.AWS_REGION }}
 
-  Continuous-Deployment:
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" >/dev/null
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -e
+          docker build -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest" .
+          docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+          echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Continuous Deployment (self-hosted)
     needs: build-and-push-ecr-image
     runs-on: self-hosted
     steps:
-    - name: checkout
-      uses: actions/checkout@v3
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Checkout (optional)
+        uses: actions/checkout@v4
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
+      # Use the same auth method as build job
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gha-ecr-deploy
 
-    - name: Pull latest images
-      run: |
-        docker pull ${{secrets.AWS_ECR_LOGIN_URI}}/${{secrets.AWS_ECR_REPOSITORY_NAME}}:latest
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Run Docker Image to serve users
-      run: |
-        docker run -d -p 8080:8080 --ipc="host" --name=mltest -e 'AWS_ACCESS_KEY_ID=${{secrets.AWS_ACCESS_KEY_ID}}' -e 'AWS_REGION=${{secrets.AWS_REGION}}' ${{secrets.AWS_ECR_LOGIN_URI}}/${{secrets.AWS_ECR_REPOSITORY_NAME}}:latest
-    - name: Clean previous images and containers
-      run: |
-        docker system prune -f
+      - name: Pull the just-built image
+        run: |
+          docker pull "${{ needs.build-and-push-ecr-image.outputs.image_uri }}"
+
+      - name: Stop & remove previous container if running
+        run: |
+          if [ "$(docker ps -aq -f name=mltest)" ]; then
+            docker stop mltest || true
+            docker rm mltest || true
+          fi
+
+      - name: Run container
+        env:
+          IMAGE_URI: ${{ needs.build-and-push-ecr-image.outputs.image_uri }}
+        run: |
+          docker run -d \
+            --name mltest \
+            --restart unless-stopped \
+            -p 8080:${{ env.CONTAINER_PORT }} \
+            --ipc="host" \
+            -e AWS_REGION=${{ env.AWS_REGION }} \
+            -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
+            -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
+            "$IMAGE_URI"
+
+      - name: Prune unused images
+        run: docker image prune -f
