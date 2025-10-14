@@ -5,8 +5,7 @@ from sklearn.preprocessing import StandardScaler
 from src.pipeline.predict_pipeline import CustomData,PredictPipeline
 from flask_cors import CORS,cross_origin
 
-application = Flask(__name__)
-app = application
+app = Flask(__name__)
 
 @app.route('/')
 @cross_origin()
