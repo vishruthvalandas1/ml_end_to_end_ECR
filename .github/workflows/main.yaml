@@ -15,6 +15,10 @@ env:
   ECR_REPOSITORY: student-performance
   CONTAINER_PORT: 8080
 
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   integration:
     name: Continuous Integration
@@ -61,7 +65,7 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          set -e
+          set -euo pipefail
           docker build -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest" .
           docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
           docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
@@ -86,14 +90,46 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Free Docker space (pre-pull)
+      - name: Show disk & Docker usage (pre-clean)
         run: |
-          set -euxo pipefail
+          df -h || true
+          df -i || true
+          docker system df -v || true
+
+      # Aggressive cleanup to avoid ENOSPC
+      - name: Free Docker space (pre-pull, aggressive)
+        run: |
+          set -euo pipefail
+
+          # Stop/remove all containers
           docker ps -aq | xargs -r docker stop
           docker ps -aq | xargs -r docker rm
-          docker system prune -af
-          docker volume prune -f
+
+          # Remove ALL images (not just dangling)
+          docker images -q | xargs -r docker rmi -f || true
+
+          # Prune everything else
+          docker system prune -af || true
+          docker volume prune -f || true
           docker builder prune -af || true
+
+          # Optional: clear buildx cache dir
+          rm -rf ~/.cache/buildx || true
+
+          # If still < 5GB free, hard reset Docker state (DANGEROUS: wipes all Docker data)
+          FREE_GB=$(df -Pk / | awk 'NR==2 {printf "%.0f\n", $4/1024/1024}')
+          if [ "${FREE_GB:-0}" -lt 5 ]; then
+            echo "Less than 5GB free, performing hard Docker reset..."
+            sudo systemctl stop docker || true
+            sudo rm -rf /var/lib/docker/* || true
+            sudo systemctl start docker || true
+          fi
+
+      - name: Show disk after cleanup
+        run: |
+          df -h || true
+          df -i || true
+          docker system df -v || true
 
       - name: Pull the just-built image
         run: docker pull "${{ needs.build-and-push-ecr-image.outputs.image_uri }}"
@@ -121,3 +157,13 @@ jobs:
         run: |
           docker image prune -f
           docker builder prune -af || true
+
+      # Keep only the last 2 images for this repo (optional)
+      - name: Keep last 2 images for repo (optional)
+        run: |
+          set -euo pipefail
+          REPO="${{ env.ECR_REPOSITORY }}"
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          docker images --format '{{.Repository}} {{.ID}} {{.Tag}}' | \
+            awk -v repo="$REGISTRY/$REPO" '$1==repo {print $2" "$3}' | \
+            sort -k2,2 | head -n -2 | awk '{print $1}' | xargs -r docker rmi -f
